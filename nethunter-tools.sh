@@ -82,9 +82,7 @@ load_repo_config() {
     if [[ -f "$REPO_CONFIG_FILE" ]]; then
         source "$REPO_CONFIG_FILE"
         REPO_IS_CONFIGURED=1
-        return 0
     fi
-    return 1
 }
 
 save_repo_config() {
