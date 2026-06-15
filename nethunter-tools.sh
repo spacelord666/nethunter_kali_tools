@@ -1,83 +1,101 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-# ============================================================================
-# Kali NetHunter ARM64 Tool Installer
-# For rooted Android devices running Debian through Termux
-# ============================================================================
-
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-BLUE='\033[0;34m'; MAGENTA='\033[0;35m'; CYAN='\033[0;36m'
-WHITE='\033[1;37m'; NC='\033[0m'; BOLD='\033[1m'
+BLUE='\033[0;34m'; CYAN='\033[0;36m'; NC='\033[0m'; BOLD='\033[1m'
 
 ARCH=$(uname -m)
 SCRIPT_VERSION="1.0"
 
-# Repo config (persisted to file, loaded on startup)
 REPO_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/nethunter-tools"
 REPO_CONFIG_FILE="$REPO_CONFIG_DIR/repo.conf"
 
-# Session-level repo values (defaults used if no config file)
 REPO_URL="http://http.kali.org/kali"
 REPO_SUITE="kali-rolling"
 REPO_COMPONENTS="main contrib non-free non-free-firmware"
 REPO_KEY_URL="https://archive.kali.org/archive-key.asc"
 REPO_IS_CONFIGURED=0
 
-# ---------------------------------------------------------------------------
-# ASCII Logo
-# ---------------------------------------------------------------------------
-logo() {
+# -- helpers ----------------------------------------------------------------
+cecho() { printf "$1$2${NC}\n"; }
+header() {
     clear 2>/dev/null || true
-    echo -e "${RED}"
-    echo '╔══════════════════════════════════════════════════════════╗'
-    echo '║   ██╗  ██╗ █████╗ ██╗     ██╗    ███╗   ██╗███████╗   ║'
-    echo '║   ██║ ██╔╝██╔══██╗██║     ██║    ████╗  ██║██╔════╝   ║'
-    echo '║   █████╔╝ ███████║██║     ██║    ██╔██╗ ██║█████╗     ║'
-    echo '║   ██╔═██╗ ██╔══██║██║     ██║    ██║╚██╗██║██╔══╝     ║'
-    echo '║   ██║  ██╗██║  ██║███████╗██║    ██║ ╚████║███████╗   ║'
-    echo '║   ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚═╝    ╚═╝  ╚═══╝╚══════╝   ║'
-    echo '║                                                          ║'
-    echo '║   ████████╗██╗  ██╗██╗   ██╗███╗   ██╗████████╗███████╗║'
-    echo '║   ╚══██╔══╝██║  ██║██║   ██║████╗  ██║╚══██╔══╝██╔════╝║'
-    echo '║      ██║   ███████║██║   ██║██╔██╗ ██║   ██║   █████╗  ║'
-    echo '║      ██║   ██╔══██║██║   ██║██║╚██╗██║   ██║   ██╔══╝  ║'
-    echo '║      ██║   ██║  ██║╚██████╔╝██║ ╚████║   ██║   ███████╗║'
-    echo '║      ╚═╝   ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝   ╚═╝   ╚══════╝║'
-    echo '║                                                          ║'
-    echo -e "${GREEN}║       ARM64 Tool Installer v${SCRIPT_VERSION}              ║"
-    echo '║   For rooted Android + Termux + Debian                   ║'
-    echo -e "${RED}╚══════════════════════════════════════════════════════════╝${NC}"
-    echo
+    printf "${RED}"
+    printf "+--------------------------------------------------------------------+\n"
+    printf "|   _  __     _       ____        _   _ _____ ____  _   _ _____    |\n"
+    printf "|  | |/ /    | |     |  _ \      | \ | |_   _|  _ \| \ | | ____|   |\n"
+    printf "|  | ' /     | |     | |_) |     |  \| | | | | |_) |  \| |  _|     |\n"
+    printf "|  | . \     | |___  |  __/      | |\  | | | |  _ <| |\  | |___    |\n"
+    printf "|  |_|\_\    |_____| |_|         |_| \_| |_| |_| \_\_| \_|_____|   |\n"
+    printf "|                                                                    |\n"
+    printf "|  _   _ _____ ____  _   _ _____ ____  _____  ____  _   _ _____      |\n"
+    printf "| | \ | |_   _|  _ \| \ | |_   _|_   _| ____|  _ \| \ | | ____|    |\n"
+    printf "| |  \| | | | | |_) |  \| | | |   | | |  _| | |_) |  \| |  _|      |\n"
+    printf "| | |\  | | | |  _ <| |\  | | |   | | | |___|  _ <| |\  | |___     |\n"
+    printf "| |_| \_| |_| |_| \_\_| \_| |_|   |_| |_____|_| \_\_| \_|_____|    |\n"
+    printf "|                                                                    |\n"
+    printf "${GREEN}|           ARM64 Tool Installer v%s                          |\n" "$SCRIPT_VERSION"
+    printf "|       For rooted Android + Termux + Debian                         |\n"
+    printf "${RED}+--------------------------------------------------------------------+${NC}\n"
+    printf "\n"
 }
 
-# ---------------------------------------------------------------------------
-# Prerequisites checks
-# ---------------------------------------------------------------------------
+# -- checks -----------------------------------------------------------------
+check_env() {
+    # Inside proot-distro Debian
+    if [[ -f /etc/debian_version ]] && command -v apt-get &>/dev/null; then
+        return 0
+    fi
+
+    # In Termux native? Detect by looking for $TERMUX_VERSION or the Termux prefix
+    if [[ -n "${TERMUX_VERSION:-}" ]] || [[ -d /data/data/com.termux ]]; then
+        if command -v proot-distro &>/dev/null; then
+            if proot-distro list 2>/dev/null | grep -qi "debian"; then
+                local spath
+                spath=$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || echo "$0")
+                printf "\n${YELLOW}[*] Re-running inside proot-distro Debian...${NC}\n"
+                exec proot-distro login debian -- bash "$spath"
+                # exec replaces the process; if we reach here, it failed
+                printf "\n${RED}[!] Failed to enter proot-distro Debian.${NC}\n"
+                exit 1
+            fi
+        fi
+        printf "\n${RED}[!] proot-distro Debian not found.${NC}\n"
+        printf "    Install it with:\n"
+        printf "      pkg install proot-distro\n"
+        printf "      proot-distro install debian\n"
+        printf "      proot-distro login debian\n"
+        exit 1
+    fi
+
+    # Unknown environment
+    printf "\n${YELLOW}[!] Unknown environment. Expecting Termux + proot-distro Debian.${NC}\n"
+    printf "    Continuing anyway...\n"
+    sleep 2
+}
+
 check_arch() {
     if [[ "$ARCH" != "aarch64" ]]; then
-        echo -e "${RED}[!] This script is for ARM64 (aarch64) only. Detected: $ARCH${NC}"
+        cecho "$RED" "[!] This script is for ARM64 (aarch64) only. Detected: $ARCH"
         exit 1
     fi
 }
 
 check_root() {
     if [[ "$(id -u)" -ne 0 ]]; then
-        echo -e "${RED}[!] Root privileges required. Run with sudo or as root.${NC}"
+        cecho "$RED" "[!] Root privileges required. Run with sudo or as root."
         exit 1
     fi
 }
 
 check_apt() {
-    if ! command -v apt &>/dev/null; then
-        echo -e "${RED}[!] apt not found. This script requires Debian/Ubuntu with apt.${NC}"
+    if ! command -v apt-get &>/dev/null; then
+        cecho "$RED" "[!] apt-get not found. This script requires Debian/Ubuntu with apt."
         exit 1
     fi
 }
 
-# ---------------------------------------------------------------------------
-# Repo config persistence
-# ---------------------------------------------------------------------------
+# -- repo config persistence ------------------------------------------------
 load_repo_config() {
     if [[ -f "$REPO_CONFIG_FILE" ]]; then
         source "$REPO_CONFIG_FILE"
@@ -95,38 +113,35 @@ save_repo_config() {
 	EOF
 }
 
-# ---------------------------------------------------------------------------
-# Repository management
-# ---------------------------------------------------------------------------
+# -- repo management --------------------------------------------------------
 repo_configured() {
-    [[ "$REPO_IS_CONFIGURED" -eq 1 ]] && \
-        grep -rqs "kali.org\|$REPO_URL" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null
+    [[ "$REPO_IS_CONFIGURED" -eq 1 ]] && [[ -f /etc/apt/sources.list.d/custom-repo.list ]]
 }
 
 configure_repo() {
     while true; do
-        logo
-        echo -e "${CYAN}═══════════════════════════════════════════${NC}"
-        echo -e " ${BOLD}Repository Configuration${NC}"
-        echo -e "${CYAN}═══════════════════════════════════════════${NC}"
-        echo
-        echo -e "  ${YELLOW}Current settings:${NC}"
-        echo -e "  ${BLUE}URL:       ${NC}$REPO_URL"
-        echo -e "  ${BLUE}Suite:     ${NC}$REPO_SUITE"
-        echo -e "  ${BLUE}Comps:     ${NC}$REPO_COMPONENTS"
-        echo -e "  ${BLUE}Key URL:   ${NC}$REPO_KEY_URL"
-        echo
-        echo -e "  ${CYAN}1)${NC}  Change repo settings and add to apt"
-        echo -e "  ${CYAN}2)${NC}  Remove repo from apt sources"
-        echo -e "  ${CYAN}b)${NC}  Back to main menu"
-        echo
-        read -rp "Choose [1, 2, b]: " repo_choice
+        header
+        cecho "$CYAN" "+------------------------------------------------------------------+"
+        cecho "$CYAN" "|                       Repository Configuration                    |"
+        cecho "$CYAN" "+------------------------------------------------------------------+"
+        printf "\n"
+        printf "  Current settings:\n"
+        printf "    URL:       %s\n" "$REPO_URL"
+        printf "    Suite:     %s\n" "$REPO_SUITE"
+        printf "    Comps:     %s\n" "$REPO_COMPONENTS"
+        printf "    Key URL:   %s\n" "$REPO_KEY_URL"
+        printf "\n"
+        printf "  ${CYAN}1${NC}) Change repo settings and add to apt\n"
+        printf "  ${CYAN}2${NC}) Remove repo from apt sources\n"
+        printf "  ${CYAN}b${NC}) Back to main menu\n"
+        printf "\n"
+        read -rp "  Choose [1, 2, b]: " repo_choice
 
         case "$repo_choice" in
             1)
-                echo
-                echo -e "${YELLOW}Enter new values or press Enter to keep current:${NC}"
-                echo
+                printf "\n"
+                printf "  ${YELLOW}Enter new values or press Enter to keep current:${NC}\n"
+                printf "\n"
                 read -rp "  Repository URL [$REPO_URL]: " new_url
                 REPO_URL="${new_url:-$REPO_URL}"
                 read -rp "  Suite [$REPO_SUITE]: " new_suite
@@ -137,18 +152,22 @@ configure_repo() {
                 REPO_KEY_URL="${new_key:-$REPO_KEY_URL}"
 
                 save_repo_config
-                echo
-                echo -e "${GREEN}[+] Config saved. Now adding repo to apt...${NC}"
+                printf "\n"
+                cecho "$GREEN" "[+] Config saved. Now adding repo to apt..."
+                printf "\n"
 
-                if apt update 2>/dev/null; then
-                    apt install -y gnupg curl wget >/dev/null 2>&1 || true
-                fi
+                # make sure keyring dir exists
+                mkdir -p /usr/share/keyrings 2>/dev/null || true
+
+                # ensure apt is usable
+                apt-get update 2>/dev/null || true
+                apt-get install -y gnupg curl wget 2>/dev/null || true
 
                 local keyring="/usr/share/keyrings/custom-repo.gpg"
                 if [[ -n "$REPO_KEY_URL" ]]; then
-                    echo -e "${YELLOW}[*] Downloading GPG key...${NC}"
-                    if ! wget -q -O- "$REPO_KEY_URL" | gpg --dearmor -o "$keyring" 2>/dev/null; then
-                        echo -e "${YELLOW}[!] GPG key download failed (non-fatal). Adding repo unsigned.${NC}"
+                    printf "  ${YELLOW}[*] Downloading GPG key...${NC}\n"
+                    if ! wget -q -O- "$REPO_KEY_URL" 2>/dev/null | gpg --dearmor -o "$keyring" 2>/dev/null; then
+                        printf "  ${YELLOW}[!] GPG key download failed (non-fatal). Adding repo unsigned.${NC}\n"
                     fi
                 fi
 
@@ -166,48 +185,46 @@ configure_repo() {
 					Pin-Priority: 100
 				EOFPP
 
-                echo -e "${YELLOW}[*] Updating package lists...${NC}"
-                if apt update; then
+                printf "  ${YELLOW}[*] Updating package lists...${NC}\n"
+                if apt-get update; then
                     REPO_IS_CONFIGURED=1
-                    echo
-                    echo -e "${GREEN}[+] Repository added and configured.${NC}"
-                    echo -e "${GREEN}[+] You can now install tools from the Browse menu.${NC}"
+                    printf "\n"
+                    cecho "$GREEN" "[+] Repository added and configured."
+                    cecho "$GREEN" "[+] You can now install tools from the Browse menu."
                 else
-                    echo
-                    echo -e "${YELLOW}[!] apt update had warnings. The repo was added but check your settings.${NC}"
+                    printf "\n"
+                    cecho "$YELLOW" "[!] apt update had warnings. The repo was added but check your settings."
                     REPO_IS_CONFIGURED=1
                 fi
                 sleep 2
                 ;;
             2)
-                echo
+                printf "\n"
                 rm -f /etc/apt/sources.list.d/custom-repo.list
                 rm -f /etc/apt/preferences.d/custom-repo.pref
                 rm -f /usr/share/keyrings/custom-repo.gpg
-                apt update 2>/dev/null || true
-                echo
-                echo -e "${GREEN}[+] Repository removed from apt sources.${NC}"
+                apt-get update 2>/dev/null || true
+                printf "\n"
+                cecho "$GREEN" "[+] Repository removed from apt sources."
                 sleep 2
                 ;;
             b|B) return 0 ;;
-            *) echo -e "${RED}[!] Invalid option.${NC}"; sleep 1 ;;
+            *) cecho "$RED" "[!] Invalid option."; sleep 1 ;;
         esac
     done
 }
 
 update_packages() {
-    logo
-    echo -e "${YELLOW}[*] Updating package lists...${NC}"
-    apt update
-    echo
-    echo -e "${GREEN}[+] Done.${NC}"
-    echo
-    read -rp "Press Enter to return to menu..."
+    header
+    cecho "$YELLOW" "[*] Updating package lists..."
+    apt-get update
+    printf "\n"
+    cecho "$GREEN" "[+] Done."
+    printf "\n"
+    read -rp "  Press Enter to return to menu..."
 }
 
-# ---------------------------------------------------------------------------
-# Tool database
-# ---------------------------------------------------------------------------
+# -- tool database ----------------------------------------------------------
 get_categories() {
     cat <<-EOF
 	1) Information Gathering
@@ -215,7 +232,7 @@ get_categories() {
 	3) Wireless Attacks
 	4) Exploitation Tools
 	5) Forensics
-	6) Sniffing & Spoofing
+	6) Sniffing and Spoofing
 	7) Password Attacks
 	8) Maintaining Access
 	9) Reverse Engineering
@@ -247,7 +264,7 @@ get_category_name() {
     case "$1" in
         1) echo "Information Gathering";; 2) echo "Vulnerability Analysis";;
         3) echo "Wireless Attacks";;      4) echo "Exploitation Tools";;
-        5) echo "Forensics";;             6) echo "Sniffing & Spoofing";;
+        5) echo "Forensics";;             6) echo "Sniffing and Spoofing";;
         7) echo "Password Attacks";;      8) echo "Maintaining Access";;
         9) echo "Reverse Engineering";;   10) echo "Reporting Tools";;
         11) echo "Stress Testing";;       12) echo "Hardware Attacks";;
@@ -258,7 +275,6 @@ get_category_name() {
 get_description() {
     local t="$1"
     case "$t" in
-        # -- Information Gathering --
         nmap)       echo "Network discovery and security auditing tool" ;;
         dnsutils)   echo "DNS client utilities (dig, nslookup, nsupdate)" ;;
         enum4linux) echo "Windows/Samba enumeration from Linux" ;;
@@ -277,8 +293,6 @@ get_description() {
         amass)      echo "In-depth subdomain discovery and recon" ;;
         masscan)    echo "Massive TCP port scanner (fast as masscan)" ;;
         dmitry)     echo "Deepmagic Information Gathering Tool" ;;
-
-        # -- Vulnerability Analysis --
         sqlmap)     echo "SQL injection detection and exploitation" ;;
         dirb)       echo "Web content scanner / directory brute-forcer" ;;
         wapiti)     echo "Web application vulnerability scanner" ;;
@@ -287,8 +301,6 @@ get_description() {
         legion)     echo "Security auditing and enumeration framework" ;;
         openvas)    echo "Open Vulnerability Assessment System" ;;
         jboss-autopwn) echo "JBoss vulnerability scanner and exploiter" ;;
-
-        # -- Wireless Attacks --
         aircrack-ng) echo "802.11 WEP/WPA/WPA2 cracking suite" ;;
         kismet)     echo "Wireless network detector and sniffer" ;;
         reaver)     echo "WPS brute-force attack tool" ;;
@@ -297,8 +309,6 @@ get_description() {
         wifite)     echo "Automated wireless network auditor" ;;
         pixiewps)   echo "Offline WPS PIN brute-forcer" ;;
         mdk4)       echo "Wireless penetration testing tool" ;;
-
-        # -- Exploitation Tools --
         metasploit-framework) echo "Penetration testing framework and exploit development" ;;
         exploitdb)  echo "Public exploit database archive" ;;
         hydra)      echo "Parallel network login cracker (many protocols)" ;;
@@ -309,8 +319,6 @@ get_description() {
         shellnoob)  echo "Shellcode writing helper and debugger" ;;
         cymothoa)   echo "Shellcode injection tool into running processes" ;;
         sbd)        echo "Secure backdoor and network connection tool" ;;
-
-        # -- Forensics --
         binwalk)    echo "Firmware analysis and extraction tool" ;;
         foremost)   echo "File carving and recovery tool" ;;
         testdisk)   echo "Partition recovery and undelete tool" ;;
@@ -321,8 +329,6 @@ get_description() {
         guymager)   echo "Forensic disk imaging tool" ;;
         bulk-extractor) echo "Digital forensics feature extraction tool" ;;
         scalpel)    echo "Fast file carver for forensic recovery" ;;
-
-        # -- Sniffing & Spoofing --
         wireshark)  echo "Network protocol analysis and packet capture" ;;
         tcpdump)    echo "Command-line packet capture and analysis" ;;
         dsniff)     echo "Network sniffing toolkit (MITM, password capture)" ;;
@@ -331,8 +337,6 @@ get_description() {
         bettercap)  echo "Modern MITM framework and network monitor" ;;
         responder)  echo "LLMNR/NBT-NS/mDNS poisoner and NTLM hash capture" ;;
         tshark)     echo "CLI network protocol analyzer (Wireshark engine)" ;;
-
-        # -- Password Attacks --
         john)       echo "John the Ripper - offline password cracking" ;;
         hashcat)    echo "Advanced GPU-accelerated password recovery" ;;
         crunch)     echo "Custom wordlist generator" ;;
@@ -342,16 +346,12 @@ get_description() {
         wordlists)  echo "Collection of password wordlists" ;;
         rsmangler)  echo "Wordlist mangling and generation tool" ;;
         maskprocessor) echo "High-performance word generator with masks" ;;
-
-        # -- Maintaining Access --
         webshells)  echo "Collection of web shells for various platforms" ;;
         weevely)    echo "PHP webshell and post-exploitation tool" ;;
         shellter)   echo "Dynamic shellcode injection tool" ;;
         powersploit) echo "PowerShell post-exploitation framework" ;;
         mimikatz)   echo "Windows credential extraction tool" ;;
         backdoor-factory) echo "Patch PE/ELF binaries with backdoors" ;;
-
-        # -- Reverse Engineering --
         apktool)    echo "Android APK reverse engineering tool" ;;
         dex2jar)    echo "Convert DEX to JAR for Android analysis" ;;
         jadx)       echo "Dex-to-Java decompiler with GUI" ;;
@@ -361,24 +361,18 @@ get_description() {
         strace)     echo "System call tracer for debugging" ;;
         ltrace)     echo "Library call tracer for debugging" ;;
         gdb)        echo "GNU debugger for binary analysis" ;;
-
-        # -- Reporting Tools --
         cutycapt)   echo "Web page screenshot capture utility" ;;
         dradis)     echo "Collaborative reporting and knowledge base" ;;
         faraday)    echo "Collaborative penetration test management" ;;
         keepnote)   echo "Cross-platform note-taking application" ;;
         cherrytree) echo "Hierarchical note-taking with rich formatting" ;;
         maltego)    echo "Open-source intelligence and forensics (CE)" ;;
-
-        # -- Stress Testing --
         hping3)     echo "Network packet crafting and stress testing" ;;
         macof)      echo "MAC address flooding tool (switch DoS)" ;;
         siege)      echo "HTTP load testing and benchmarking" ;;
         slowhttptest) echo "Slow HTTP DoS attack testing tool" ;;
         thc-ssl-dos) echo "SSL/TLS denial-of-service testing" ;;
         t50)        echo "Multi-protocol network stress testing" ;;
-
-        # -- Hardware Attacks --
         minicom)    echo "Serial communication terminal" ;;
         ubertooth)  echo "Bluetooth testing and monitoring (Ubertooth)" ;;
         bluelog)    echo "Bluetooth device discovery and logging" ;;
@@ -387,68 +381,60 @@ get_description() {
         spooftooph) echo "Bluetooth device spoofing tool" ;;
         killerbee)  echo "ZigBee/802.15.4 security testing" ;;
         rfdump)     echo "RFID tag data dumping tool" ;;
-
         *)          echo "No description available for: $t" ;;
     esac
 }
 
-# ---------------------------------------------------------------------------
-# Search tool
-# ---------------------------------------------------------------------------
+# -- search -----------------------------------------------------------------
 search_tool() {
-    logo
-    echo -e "${CYAN}═══════════════════════════════════════════${NC}"
-    echo -e " ${BOLD}Search Tools${NC}"
-    echo -e "${CYAN}═══════════════════════════════════════════${NC}"
-    echo
-    read -rp "Search for a tool (name or keyword): " query
-    echo
+    header
+    cecho "$CYAN" "+------------------------------------------------------------------+"
+    cecho "$CYAN" "|                          Search Tools                             |"
+    cecho "$CYAN" "+------------------------------------------------------------------+"
+    printf "\n"
+    read -rp "  Search for a tool (name or keyword): " query
+    printf "\n"
 
     if [[ -z "$query" ]]; then
-        echo -e "${YELLOW}[i] No search term entered.${NC}"
-        echo
-        read -rp "Press Enter to return..."
+        cecho "$YELLOW" "[i] No search term entered."
+        printf "\n"
+        read -rp "  Press Enter to return..."
         return
     fi
 
     local found=0
     for cat_id in $(seq 1 12); do
-        local cname
-        cname=$(get_category_name "$cat_id")
+        local cname=$(get_category_name "$cat_id")
         for tool in $(get_tools_for_category "$cat_id"); do
             if echo "$tool" | grep -iq "$query"; then
                 if [[ $found -eq 0 ]]; then
-                    echo -e "${GREEN}Results for '$query':${NC}"
-                    echo
+                    cecho "$GREEN" "  Results for '$query':"
+                    printf "\n"
                 fi
-                local desc
-                desc=$(get_description "$tool")
-                printf "  ${CYAN}%-22s${NC} %s\n" "$tool" "$desc"
+                local desc=$(get_description "$tool")
+                printf "    ${CYAN}%-22s${NC} %s\n" "$tool" "$desc"
                 ((found++))
             fi
         done
     done
 
     if [[ $found -eq 0 ]]; then
-        echo -e "${YELLOW}[i] No matching tools found for '$query'.${NC}"
+        cecho "$YELLOW" "[i] No matching tools found for '$query'."
     else
-        echo
-        echo -e "${GREEN}[+] $found match(es) found.${NC}"
+        printf "\n"
+        cecho "$GREEN" "[+] $found match(es) found."
     fi
-
-    echo
-    read -rp "Press Enter to return to menu..."
+    printf "\n"
+    read -rp "  Press Enter to return to menu..."
 }
 
-# ---------------------------------------------------------------------------
-# Show installed tools
-# ---------------------------------------------------------------------------
+# -- installed tools --------------------------------------------------------
 show_installed() {
-    logo
-    echo -e "${CYAN}═══════════════════════════════════════════${NC}"
-    echo -e " ${BOLD}Installed NetHunter Tools${NC}"
-    echo -e "${CYAN}═══════════════════════════════════════════${NC}"
-    echo
+    header
+    cecho "$CYAN" "+------------------------------------------------------------------+"
+    cecho "$CYAN" "|                    Installed NetHunter Tools                      |"
+    cecho "$CYAN" "+------------------------------------------------------------------+"
+    printf "\n"
 
     local all_tools=""
     for cat_id in $(seq 1 12); do
@@ -458,97 +444,86 @@ show_installed() {
     local count=0
     for tool in $all_tools; do
         if dpkg -l "$tool" 2>/dev/null | grep -q '^ii'; then
-            local desc
-            desc=$(get_description "$tool")
-            printf "  ${GREEN}✔${NC} ${CYAN}%-22s${NC} %s\n" "$tool" "$desc"
+            local desc=$(get_description "$tool")
+            printf "  ${GREEN}[*]${NC} ${CYAN}%-22s${NC} %s\n" "$tool" "$desc"
             ((count++))
         fi
     done
 
     if [[ $count -eq 0 ]]; then
-        echo -e "${YELLOW}[i] No Kali NetHunter tools are currently installed.${NC}"
+        cecho "$YELLOW" "[i] No Kali NetHunter tools are currently installed."
     else
-        echo
-        echo -e "${GREEN}[+] $count tool(s) installed.${NC}"
+        printf "\n"
+        cecho "$GREEN" "[+] $count tool(s) installed."
     fi
-
-    echo
-    read -rp "Press Enter to return to menu..."
+    printf "\n"
+    read -rp "  Press Enter to return to menu..."
 }
 
-# ---------------------------------------------------------------------------
-# Install a single tool with confirmation and info
-# ---------------------------------------------------------------------------
+# -- install a tool ---------------------------------------------------------
 install_tool() {
     local tool="$1"
-    local desc
-    desc=$(get_description "$tool")
+    local desc=$(get_description "$tool")
 
-    logo
-    echo -e "${CYAN}═══════════════════════════════════════════${NC}"
-    echo -e " ${BOLD}Tool: $tool${NC}"
-    echo -e "${CYAN}═══════════════════════════════════════════${NC}"
-    echo
-    echo -e "  ${BOLD}Description:${NC} $desc"
-    echo
+    header
+    cecho "$CYAN" "+------------------------------------------------------------------+"
+    printf "|${NC}                         ${BOLD}Tool: %s${NC}                        |\n" "$tool"
+    cecho "$CYAN" "+------------------------------------------------------------------+"
+    printf "\n"
+    printf "  ${BOLD}Description:${NC} %s\n" "$desc"
+    printf "\n"
 
     if ! repo_configured; then
-        echo -e "${YELLOW}[!] No repository is configured.${NC}"
-        echo -e "${YELLOW}[!] Use option 1 from the main menu first.${NC}"
-        echo
-        read -rp "Press Enter to return..."
+        cecho "$YELLOW" "[!] No repository is configured."
+        cecho "$YELLOW" "[!] Use option 1 from the main menu first."
+        printf "\n"
+        read -rp "  Press Enter to return..."
         return
     fi
 
     if dpkg -l "$tool" 2>/dev/null | grep -q '^ii'; then
-        echo -e "${GREEN}[+] $tool is already installed.${NC}"
-        echo
-        read -rp "Press Enter to return..."
+        cecho "$GREEN" "[+] $tool is already installed."
+        printf "\n"
+        read -rp "  Press Enter to return..."
         return
     fi
 
-    echo -e "${YELLOW}[*] About to install: $tool${NC}"
-    echo -e "${YELLOW}[*] Category: $(echo $(get_category_name "$cat_id_global" 2>/dev/null || echo "N/A"))${NC}"
-    echo
-    read -rp "Proceed with installation? [Y/n]: " confirm
+    printf "${YELLOW}[*] About to install: $tool${NC}\n"
+    printf "\n"
+    read -rp "  Proceed with installation? [Y/n]: " confirm
     confirm="${confirm:-Y}"
 
     if [[ "$confirm" =~ ^[Yy] ]]; then
-        echo
-        echo -e "${YELLOW}[*] Installing $tool...${NC}"
-        apt install -y "$tool" 2>&1 | tail -5
-        echo
-        echo -e "${GREEN}[+] Installation complete: $tool${NC}"
+        printf "\n"
+        cecho "$YELLOW" "[*] Installing $tool..."
+        apt-get install -y "$tool" 2>&1 | tail -5
+        printf "\n"
+        cecho "$GREEN" "[+] Installation complete: $tool"
     else
-        echo
-        echo -e "${YELLOW}[i] Skipped.${NC}"
+        printf "\n"
+        cecho "$YELLOW" "[i] Skipped."
     fi
-
-    echo
-    read -rp "Press Enter to return..."
+    printf "\n"
+    read -rp "  Press Enter to return..."
 }
 
-# ---------------------------------------------------------------------------
-# Browse a category
-# ---------------------------------------------------------------------------
+# -- browse category --------------------------------------------------------
 browse_category() {
     local cat_id="$1"
-    local cname
-    cname=$(get_category_name "$cat_id")
+    local cname=$(get_category_name "$cat_id")
 
     while true; do
-        logo
-        echo -e "${CYAN}═══════════════════════════════════════════${NC}"
-        echo -e " ${BOLD}Category: $cname${NC}"
-        echo -e "${CYAN}═══════════════════════════════════════════${NC}"
-        echo
+        header
+        cecho "$CYAN" "+------------------------------------------------------------------+"
+        printf "|${NC}                      ${BOLD}Category: %s${NC}                        |\n" "$cname"
+        cecho "$CYAN" "+------------------------------------------------------------------+"
+        printf "\n"
 
-        local tools
-        tools=$(get_tools_for_category "$cat_id")
+        local tools=$(get_tools_for_category "$cat_id")
         if [[ -z "$tools" ]]; then
-            echo -e "${YELLOW}[i] No tools defined for this category.${NC}"
-            echo
-            read -rp "Press Enter to return..."
+            cecho "$YELLOW" "[i] No tools defined for this category."
+            printf "\n"
+            read -rp "  Press Enter to return..."
             return
         fi
 
@@ -557,16 +532,15 @@ browse_category() {
         for t in $tools; do
             ((i++))
             tool_list+=("$t")
-            local desc
-            desc=$(get_description "$t")
+            local desc=$(get_description "$t")
             printf "  ${CYAN}%2d)${NC} ${BOLD}%-22s${NC} %s\n" "$i" "$t" "$desc"
         done
 
-        echo
-        echo -e "  ${YELLOW}b)${NC} Back to category menu"
-        echo -e "  ${YELLOW}m)${NC} Main menu"
-        echo
-        read -rp "Select a tool [1-$i, b, m]: " choice
+        printf "\n"
+        printf "  ${YELLOW}b${NC}) Back to category menu\n"
+        printf "  ${YELLOW}m${NC}) Main menu\n"
+        printf "\n"
+        read -rp "  Select a tool [1-$i, b, m]: " choice
 
         case "$choice" in
             m) return 2 ;;
@@ -577,7 +551,7 @@ browse_category() {
                     cat_id_global="$cat_id"
                     install_tool "$selected"
                 else
-                    echo -e "${RED}[!] Invalid option.${NC}"
+                    cecho "$RED" "[!] Invalid option."
                     sleep 1
                 fi
                 ;;
@@ -585,33 +559,28 @@ browse_category() {
     done
 }
 
-# ---------------------------------------------------------------------------
-# Category selection menu
-# ---------------------------------------------------------------------------
+# -- category menu ----------------------------------------------------------
 category_menu() {
     while true; do
-        logo
-        echo -e "${CYAN}═══════════════════════════════════════════${NC}"
-        echo -e " ${BOLD}Tool Categories${NC}"
-        echo -e "${CYAN}═══════════════════════════════════════════${NC}"
-        echo
-        echo -e "  ${YELLOW}Select a category:${NC}"
-        echo
+        header
+        cecho "$CYAN" "+------------------------------------------------------------------+"
+        cecho "$CYAN" "|                         Tool Categories                           |"
+        cecho "$CYAN" "+------------------------------------------------------------------+"
+        printf "\n"
+        cecho "$YELLOW" "  Select a category:"
+        printf "\n"
 
-        local cats
-        cats=$(get_categories)
+        local cats=$(get_categories)
         local i=0
-        local cat_ids=()
         while IFS= read -r line; do
             ((i++))
-            cat_ids+=("$i")
-            printf "  ${CYAN}%2d)${NC} %s\n" "$i" "${line#??}"
+            printf "  ${CYAN}%2d${NC}) %s\n" "$i" "${line#??}"
         done <<< "$cats"
 
-        echo
-        echo -e "  ${YELLOW}m)${NC} Main menu"
-        echo
-        read -rp "Select category [1-$i, m]: " choice
+        printf "\n"
+        printf "  ${YELLOW}m${NC}) Main menu\n"
+        printf "\n"
+        read -rp "  Select category [1-$i, m]: " choice
 
         case "$choice" in
             m) return 0 ;;
@@ -621,7 +590,7 @@ category_menu() {
                     local ret=$?
                     [[ $ret -eq 2 ]] && return 0
                 else
-                    echo -e "${RED}[!] Invalid option.${NC}"
+                    cecho "$RED" "[!] Invalid option."
                     sleep 1
                 fi
                 ;;
@@ -629,32 +598,30 @@ category_menu() {
     done
 }
 
-# ---------------------------------------------------------------------------
-# Main menu
-# ---------------------------------------------------------------------------
+# -- main menu --------------------------------------------------------------
 main_menu() {
     while true; do
-        logo
-        echo -e "${GREEN}═══════════════════════════════════════════${NC}"
-        echo -e " ${BOLD}Main Menu${NC}"
-        echo -e "${GREEN}═══════════════════════════════════════════${NC}"
-        echo
-        echo -e "  ${CYAN}1)${NC}  Configure Repository"
-        echo -e "  ${CYAN}2)${NC}  Browse Tools by Category"
-        echo -e "  ${CYAN}3)${NC}  Search for a Tool"
-        echo -e "  ${CYAN}4)${NC}  Update Package Lists"
-        echo -e "  ${CYAN}5)${NC}  Show Installed NetHunter Tools"
-        echo -e "  ${CYAN}e)${NC}  Exit"
-        echo
+        header
+        cecho "$GREEN" "+------------------------------------------------------------------+"
+        cecho "$GREEN" "|                          Main Menu                               |"
+        cecho "$GREEN" "+------------------------------------------------------------------+"
+        printf "\n"
+        printf "  ${CYAN}1${NC}) Configure Repository\n"
+        printf "  ${CYAN}2${NC}) Browse Tools by Category\n"
+        printf "  ${CYAN}3${NC}) Search for a Tool\n"
+        printf "  ${CYAN}4${NC}) Update Package Lists\n"
+        printf "  ${CYAN}5${NC}) Show Installed NetHunter Tools\n"
+        printf "  ${CYAN}e${NC}) Exit\n"
+        printf "\n"
 
         if repo_configured; then
-            echo -e "  ${GREEN}[✓] Repo: configured${NC}"
+            printf "  ${GREEN}[+] Repo: configured${NC}\n"
         else
-            echo -e "  ${RED}[✗] Repo: not configured${NC}"
+            printf "  ${RED}[x] Repo: not configured${NC}\n"
         fi
-        echo -e "  ${BLUE}[i] Architecture: $ARCH${NC}"
-        echo
-        read -rp "Select option [1-5, e]: " choice
+        printf "  ${BLUE}[i] Architecture: $ARCH${NC}\n"
+        printf "\n"
+        read -rp "  Select option [1-5, e]: " choice
 
         case "$choice" in
             1) configure_repo ;;
@@ -663,21 +630,19 @@ main_menu() {
             4) update_packages ;;
             5) show_installed ;;
             e|E)
-                echo
-                echo -e "${GREEN}[+] Exiting. Stay sharp.${NC}"
+                printf "\n"
+                cecho "$GREEN" "[+] Exiting. Stay sharp."
                 exit 0
                 ;;
             *)
-                echo -e "${RED}[!] Invalid option.${NC}"
+                cecho "$RED" "[!] Invalid option."
                 sleep 1
                 ;;
         esac
     done
 }
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
+# -- entry point ------------------------------------------------------------
 main() {
     check_arch
     check_root
