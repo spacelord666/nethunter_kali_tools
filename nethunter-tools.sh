@@ -10,11 +10,19 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; MAGENTA='\033[0;35m'; CYAN='\033[0;36m'
 WHITE='\033[1;37m'; NC='\033[0m'; BOLD='\033[1m'
 
-KALI_REPO_URL="https://http.kali.org/kali"
-KALI_DIST="kali-rolling"
-KALI_COMP="main non-free contrib"
 ARCH=$(uname -m)
 SCRIPT_VERSION="1.0"
+
+# Repo config (persisted to file, loaded on startup)
+REPO_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/nethunter-tools"
+REPO_CONFIG_FILE="$REPO_CONFIG_DIR/repo.conf"
+
+# Session-level repo values (defaults used if no config file)
+REPO_URL="http://http.kali.org/kali"
+REPO_SUITE="kali-rolling"
+REPO_COMPONENTS="main contrib non-free non-free-firmware"
+REPO_KEY_URL="https://archive.kali.org/archive-key.asc"
+REPO_IS_CONFIGURED=0
 
 # ---------------------------------------------------------------------------
 # ASCII Logo
@@ -68,66 +76,135 @@ check_apt() {
 }
 
 # ---------------------------------------------------------------------------
+# Repo config persistence
+# ---------------------------------------------------------------------------
+load_repo_config() {
+    if [[ -f "$REPO_CONFIG_FILE" ]]; then
+        source "$REPO_CONFIG_FILE"
+        REPO_IS_CONFIGURED=1
+        return 0
+    fi
+    return 1
+}
+
+save_repo_config() {
+    mkdir -p "$REPO_CONFIG_DIR"
+    cat > "$REPO_CONFIG_FILE" <<-EOF
+		REPO_URL="$REPO_URL"
+		REPO_SUITE="$REPO_SUITE"
+		REPO_COMPONENTS="$REPO_COMPONENTS"
+		REPO_KEY_URL="$REPO_KEY_URL"
+	EOF
+}
+
+# ---------------------------------------------------------------------------
 # Repository management
 # ---------------------------------------------------------------------------
 repo_configured() {
-    grep -rqs "kali.org" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null
+    if [[ "$REPO_IS_CONFIGURED" -eq 1 ]] && \
+       ls /etc/apt/sources.list.d/*.list /etc/apt/sources.list 2>/dev/null | \
+       xargs grep -rls "kali.org\|$REPO_URL" 2>/dev/null | grep -q .; then
+        return 0
+    fi
+    return 1
 }
 
-add_kali_repo() {
-    logo
-    echo -e "${YELLOW}[*] Adding Kali NetHunter repository...${NC}"
-    echo
-
-    if repo_configured; then
-        echo -e "${GREEN}[+] Kali repository is already configured.${NC}"
+configure_repo() {
+    while true; do
+        logo
+        echo -e "${CYAN}═══════════════════════════════════════════${NC}"
+        echo -e " ${BOLD}Configure Repository${NC}"
+        echo -e "${CYAN}═══════════════════════════════════════════${NC}"
         echo
-        read -rp "Press Enter to return to menu..."
-        return
-    fi
+        echo -e "  ${YELLOW}Current configuration:${NC}"
+        echo -e "  ${BLUE}URL:       ${NC}$REPO_URL"
+        echo -e "  ${BLUE}Suite:     ${NC}$REPO_SUITE"
+        echo -e "  ${BLUE}Comps:     ${NC}$REPO_COMPONENTS"
+        echo -e "  ${BLUE}Key URL:   ${NC}$REPO_KEY_URL"
+        echo
+        echo -e "  ${YELLOW}What would you like to do?${NC}"
+        echo
+        echo -e "  ${CYAN}1)${NC}  Enter new repo details"
+        echo -e "  ${CYAN}2)${NC}  Download GPG key and add repo to apt"
+        echo -e "  ${CYAN}3)${NC}  Remove repo from apt sources"
+        echo -e "  ${CYAN}b)${NC}  Back to main menu"
+        echo
+        read -rp "Select option [1-3, b]: " repo_choice
 
-    apt update
-    apt install -y gnupg curl wget
+        case "$repo_choice" in
+            1)
+                echo
+                read -rp "Repository URL [$REPO_URL]: " new_url
+                REPO_URL="${new_url:-$REPO_URL}"
+                read -rp "Suite [$REPO_SUITE]: " new_suite
+                REPO_SUITE="${new_suite:-$REPO_SUITE}"
+                read -rp "Components [$REPO_COMPONENTS]: " new_comps
+                REPO_COMPONENTS="${new_comps:-$REPO_COMPONENTS}"
+                read -rp "GPG key URL [$REPO_KEY_URL]: " new_key
+                REPO_KEY_URL="${new_key:-$REPO_KEY_URL}"
 
-    local keyring="/usr/share/keyrings/kali-archive-keyring.gpg"
-    if [[ ! -f "$keyring" ]]; then
-        echo -e "${YELLOW}[*] Downloading Kali archive GPG key...${NC}"
-        wget -q -O- "https://archive.kali.org/archive-key.asc" | \
-            gpg --dearmor -o "$keyring"
-    fi
+                save_repo_config
+                REPO_IS_CONFIGURED=1
+                echo
+                echo -e "${GREEN}[+] Repo configuration saved.${NC}"
+                echo -e "${YELLOW}[i] Use option 2 to add it to apt sources.${NC}"
+                sleep 2
+                ;;
+            2)
+                echo
+                apt update
+                apt install -y gnupg curl wget
 
-    local list="/etc/apt/sources.list.d/kali.list"
-    echo "deb [signed-by=$keyring] $KALI_REPO_URL $KALI_DIST $KALI_COMP" > "$list"
+                local keyring="/usr/share/keyrings/custom-repo.gpg"
+                if [[ -n "$REPO_KEY_URL" ]]; then
+                    echo -e "${YELLOW}[*] Downloading GPG key...${NC}"
+                    wget -q -O- "$REPO_KEY_URL" | gpg --dearmor -o "$keyring" 2>/dev/null || {
+                        echo -e "${RED}[!] Failed to download GPG key. Try a different URL.${NC}"
+                        sleep 2
+                        continue
+                    }
+                fi
 
-    local pref="/etc/apt/preferences.d/kali.pref"
-    cat > "$pref" <<-EOF
-		Package: *
-		Pin: release o=Kali
-		Pin-Priority: 100
-	EOF
+                local list="/etc/apt/sources.list.d/custom-repo.list"
+                local signed=""
+                if [[ -f "$keyring" ]]; then
+                    signed="[signed-by=$keyring]"
+                fi
+                echo "deb $signed $REPO_URL $REPO_SUITE $REPO_COMPONENTS" > "$list"
 
-    echo -e "${YELLOW}[*] Updating package lists...${NC}"
-    apt update
+                echo -e "${YELLOW}[*] Setting up APT pinning (priority 100)...${NC}"
 
-    echo
-    echo -e "${GREEN}[+] Kali NetHunter repository added with APT pinning (priority 100).${NC}"
-    echo -e "${YELLOW}[i] Kali packages will only be installed when explicitly requested.${NC}"
-    echo
-    read -rp "Press Enter to return to menu..."
-}
+                local pref="/etc/apt/preferences.d/custom-repo.pref"
+                cat > "$pref" <<-EOFPP
+					Package: *
+					Pin: release o=*
+					Pin-Priority: 100
+				EOFPP
 
-remove_kali_repo() {
-    logo
-    echo -e "${YELLOW}[*] Removing Kali repository...${NC}"
-    echo
+                echo -e "${YELLOW}[*] Updating package lists...${NC}"
+                apt update
 
-    rm -f /etc/apt/sources.list.d/kali.list
-    rm -f /etc/apt/preferences.d/kali.pref
-    apt update
-
-    echo -e "${GREEN}[+] Kali repository removed.${NC}"
-    echo
-    read -rp "Press Enter to return to menu..."
+                save_repo_config
+                REPO_IS_CONFIGURED=1
+                echo
+                echo -e "${GREEN}[+] Repository added to apt sources.${NC}"
+                echo -e "${YELLOW}[i] You can now install tools from this repo.${NC}"
+                sleep 2
+                ;;
+            3)
+                echo
+                rm -f /etc/apt/sources.list.d/custom-repo.list
+                rm -f /etc/apt/preferences.d/custom-repo.pref
+                rm -f /usr/share/keyrings/custom-repo.gpg
+                apt update
+                echo
+                echo -e "${GREEN}[+] Repository removed from apt sources.${NC}"
+                sleep 2
+                ;;
+            b|B) return 0 ;;
+            *) echo -e "${RED}[!] Invalid option.${NC}"; sleep 1 ;;
+        esac
+    done
 }
 
 update_packages() {
@@ -428,7 +505,7 @@ install_tool() {
     echo
 
     if ! repo_configured; then
-        echo -e "${YELLOW}[!] Kali repository is not configured.${NC}"
+        echo -e "${YELLOW}[!] No repository is configured.${NC}"
         echo -e "${YELLOW}[!] Use option 1 from the main menu first.${NC}"
         echo
         read -rp "Press Enter to return..."
@@ -574,31 +651,29 @@ main_menu() {
         echo -e " ${BOLD}Main Menu${NC}"
         echo -e "${GREEN}═══════════════════════════════════════════${NC}"
         echo
-        echo -e "  ${CYAN}1)${NC}  Add Kali NetHunter Repository"
-        echo -e "  ${CYAN}2)${NC}  Remove Kali Repository"
-        echo -e "  ${CYAN}3)${NC}  Browse Tools by Category"
-        echo -e "  ${CYAN}4)${NC}  Search for a Tool"
-        echo -e "  ${CYAN}5)${NC}  Update Package Lists"
-        echo -e "  ${CYAN}6)${NC}  Show Installed NetHunter Tools"
+        echo -e "  ${CYAN}1)${NC}  Configure Repository"
+        echo -e "  ${CYAN}2)${NC}  Browse Tools by Category"
+        echo -e "  ${CYAN}3)${NC}  Search for a Tool"
+        echo -e "  ${CYAN}4)${NC}  Update Package Lists"
+        echo -e "  ${CYAN}5)${NC}  Show Installed NetHunter Tools"
         echo -e "  ${CYAN}e)${NC}  Exit"
         echo
 
         if repo_configured; then
-            echo -e "  ${GREEN}[✓] Kali repo: configured${NC}"
+            echo -e "  ${GREEN}[✓] Repo: configured${NC}"
         else
-            echo -e "  ${RED}[✗] Kali repo: not configured${NC}"
+            echo -e "  ${RED}[✗] Repo: not configured${NC}"
         fi
         echo -e "  ${BLUE}[i] Architecture: $ARCH${NC}"
         echo
-        read -rp "Select option [1-6, e]: " choice
+        read -rp "Select option [1-5, e]: " choice
 
         case "$choice" in
-            1) add_kali_repo ;;
-            2) remove_kali_repo ;;
-            3) category_menu ;;
-            4) search_tool ;;
-            5) update_packages ;;
-            6) show_installed ;;
+            1) configure_repo ;;
+            2) category_menu ;;
+            3) search_tool ;;
+            4) update_packages ;;
+            5) show_installed ;;
             e|E)
                 echo
                 echo -e "${GREEN}[+] Exiting. Stay sharp.${NC}"
@@ -619,6 +694,7 @@ main() {
     check_arch
     check_root
     check_apt
+    load_repo_config
     main_menu
 }
 
