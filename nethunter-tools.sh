@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 
 # ============================================================================
 # Kali NetHunter ARM64 Tool Installer
@@ -28,7 +28,7 @@ REPO_IS_CONFIGURED=0
 # ASCII Logo
 # ---------------------------------------------------------------------------
 logo() {
-    clear
+    clear 2>/dev/null || true
     echo -e "${RED}"
     echo '╔══════════════════════════════════════════════════════════╗'
     echo '║   ██╗  ██╗ █████╗ ██╗     ██╗    ███╗   ██╗███████╗   ║'
@@ -99,68 +99,57 @@ save_repo_config() {
 # Repository management
 # ---------------------------------------------------------------------------
 repo_configured() {
-    if [[ "$REPO_IS_CONFIGURED" -eq 1 ]] && \
-       ls /etc/apt/sources.list.d/*.list /etc/apt/sources.list 2>/dev/null | \
-       xargs grep -rls "kali.org\|$REPO_URL" 2>/dev/null | grep -q .; then
-        return 0
-    fi
-    return 1
+    [[ "$REPO_IS_CONFIGURED" -eq 1 ]] && \
+        grep -rqs "kali.org\|$REPO_URL" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null
 }
 
 configure_repo() {
     while true; do
         logo
         echo -e "${CYAN}═══════════════════════════════════════════${NC}"
-        echo -e " ${BOLD}Configure Repository${NC}"
+        echo -e " ${BOLD}Repository Configuration${NC}"
         echo -e "${CYAN}═══════════════════════════════════════════${NC}"
         echo
-        echo -e "  ${YELLOW}Current configuration:${NC}"
+        echo -e "  ${YELLOW}Current settings:${NC}"
         echo -e "  ${BLUE}URL:       ${NC}$REPO_URL"
         echo -e "  ${BLUE}Suite:     ${NC}$REPO_SUITE"
         echo -e "  ${BLUE}Comps:     ${NC}$REPO_COMPONENTS"
         echo -e "  ${BLUE}Key URL:   ${NC}$REPO_KEY_URL"
         echo
-        echo -e "  ${YELLOW}What would you like to do?${NC}"
-        echo
-        echo -e "  ${CYAN}1)${NC}  Enter new repo details"
-        echo -e "  ${CYAN}2)${NC}  Download GPG key and add repo to apt"
-        echo -e "  ${CYAN}3)${NC}  Remove repo from apt sources"
+        echo -e "  ${CYAN}1)${NC}  Change repo settings and add to apt"
+        echo -e "  ${CYAN}2)${NC}  Remove repo from apt sources"
         echo -e "  ${CYAN}b)${NC}  Back to main menu"
         echo
-        read -rp "Select option [1-3, b]: " repo_choice
+        read -rp "Choose [1, 2, b]: " repo_choice
 
         case "$repo_choice" in
             1)
                 echo
-                read -rp "Repository URL [$REPO_URL]: " new_url
+                echo -e "${YELLOW}Enter new values or press Enter to keep current:${NC}"
+                echo
+                read -rp "  Repository URL [$REPO_URL]: " new_url
                 REPO_URL="${new_url:-$REPO_URL}"
-                read -rp "Suite [$REPO_SUITE]: " new_suite
+                read -rp "  Suite [$REPO_SUITE]: " new_suite
                 REPO_SUITE="${new_suite:-$REPO_SUITE}"
-                read -rp "Components [$REPO_COMPONENTS]: " new_comps
+                read -rp "  Components [$REPO_COMPONENTS]: " new_comps
                 REPO_COMPONENTS="${new_comps:-$REPO_COMPONENTS}"
-                read -rp "GPG key URL [$REPO_KEY_URL]: " new_key
+                read -rp "  GPG key URL [$REPO_KEY_URL]: " new_key
                 REPO_KEY_URL="${new_key:-$REPO_KEY_URL}"
 
                 save_repo_config
-                REPO_IS_CONFIGURED=1
                 echo
-                echo -e "${GREEN}[+] Repo configuration saved.${NC}"
-                echo -e "${YELLOW}[i] Use option 2 to add it to apt sources.${NC}"
-                sleep 2
-                ;;
-            2)
-                echo
-                apt update
-                apt install -y gnupg curl wget
+                echo -e "${GREEN}[+] Config saved. Now adding repo to apt...${NC}"
+
+                if apt update 2>/dev/null; then
+                    apt install -y gnupg curl wget >/dev/null 2>&1 || true
+                fi
 
                 local keyring="/usr/share/keyrings/custom-repo.gpg"
                 if [[ -n "$REPO_KEY_URL" ]]; then
                     echo -e "${YELLOW}[*] Downloading GPG key...${NC}"
-                    wget -q -O- "$REPO_KEY_URL" | gpg --dearmor -o "$keyring" 2>/dev/null || {
-                        echo -e "${RED}[!] Failed to download GPG key. Try a different URL.${NC}"
-                        sleep 2
-                        continue
-                    }
+                    if ! wget -q -O- "$REPO_KEY_URL" | gpg --dearmor -o "$keyring" 2>/dev/null; then
+                        echo -e "${YELLOW}[!] GPG key download failed (non-fatal). Adding repo unsigned.${NC}"
+                    fi
                 fi
 
                 local list="/etc/apt/sources.list.d/custom-repo.list"
@@ -170,8 +159,6 @@ configure_repo() {
                 fi
                 echo "deb $signed $REPO_URL $REPO_SUITE $REPO_COMPONENTS" > "$list"
 
-                echo -e "${YELLOW}[*] Setting up APT pinning (priority 100)...${NC}"
-
                 local pref="/etc/apt/preferences.d/custom-repo.pref"
                 cat > "$pref" <<-EOFPP
 					Package: *
@@ -180,21 +167,24 @@ configure_repo() {
 				EOFPP
 
                 echo -e "${YELLOW}[*] Updating package lists...${NC}"
-                apt update
-
-                save_repo_config
-                REPO_IS_CONFIGURED=1
-                echo
-                echo -e "${GREEN}[+] Repository added to apt sources.${NC}"
-                echo -e "${YELLOW}[i] You can now install tools from this repo.${NC}"
+                if apt update; then
+                    REPO_IS_CONFIGURED=1
+                    echo
+                    echo -e "${GREEN}[+] Repository added and configured.${NC}"
+                    echo -e "${GREEN}[+] You can now install tools from the Browse menu.${NC}"
+                else
+                    echo
+                    echo -e "${YELLOW}[!] apt update had warnings. The repo was added but check your settings.${NC}"
+                    REPO_IS_CONFIGURED=1
+                fi
                 sleep 2
                 ;;
-            3)
+            2)
                 echo
                 rm -f /etc/apt/sources.list.d/custom-repo.list
                 rm -f /etc/apt/preferences.d/custom-repo.pref
                 rm -f /usr/share/keyrings/custom-repo.gpg
-                apt update
+                apt update 2>/dev/null || true
                 echo
                 echo -e "${GREEN}[+] Repository removed from apt sources.${NC}"
                 sleep 2
